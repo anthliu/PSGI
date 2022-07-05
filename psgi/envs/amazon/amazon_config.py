@@ -1,0 +1,244 @@
+'''Configuration script for Amazon environment.'''
+from typing import Dict
+import numpy as np
+
+from psgi.utils import env_utils, graph_utils
+from psgi.envs import base_config as base
+from psgi.envs.base_config import WobConfig
+from psgi.envs.logic_graph import SubtaskLogicGraph
+
+
+# Stage 0 (base)
+BASE_SUBTASKS = [
+    'Click Items',
+    'Click SP',
+    'Click Amazon GoPage1'
+]
+
+# Stage 1 (contact & shipping addresses)
+BASE2_SUBTASKS = [
+    'Click Shipping',
+    'Click Billing',
+    'Click Payment',
+    'Click Gift',
+    'Click ShipMethod',
+]
+SHIPPING_REQUIRED = [
+    'Fill First', 'Fill Last',
+    'Fill Street', 'Fill State', 'Fill City', 'Fill Zip'
+]
+SHIPPING_OPTIONAL = ['Fill Apt', 'Fill SecurityCode']
+SHIPPING_SUBTASKS = SHIPPING_REQUIRED + SHIPPING_OPTIONAL
+
+SELECT_SHIPMETHOD_SUBTASKS = [
+    'Click Standard',
+    'Click Expedited',
+    'Click NextDay'
+]
+
+BILLING_REQUIRED = [
+    'Fill BillFirst', 'Fill BillLast',
+    'Fill BillStreet', 'Fill BillState', 'Fill BillCity', 'Fill BillZip'
+]
+BILLING_OPTIONAL = ['Fill BillApt', 'Fill BillSecurityCode']
+BILLING_SUBTASKS = BILLING_REQUIRED + BILLING_OPTIONAL
+
+FILL_CREDIT_SUBTASKS = [
+    'Fill C_NUM',
+    'Fill C_EXPMM',
+    'Fill C_EXPYY',
+    'Fill C_CVV'
+]
+
+FILL_GIFT_SUBTASKS = [
+    'Fill G_NUM',
+    'Fill G_PIN'
+]
+
+FINISH1_SUBTASKS = [
+    'Click FinishShipping',
+    'Click FinishBilling',
+    'Click FinishShipMethod',
+    'Click FinishPayment',
+]
+
+FINAL_SUBTASKS = [
+    'Click Place Order',  # terminal
+    'Click EditShipMethod',
+    'Click EditShipping',
+    'Click ToU'
+]
+
+SUBTASK_LIST = BASE_SUBTASKS + BASE2_SUBTASKS + SHIPPING_SUBTASKS + SELECT_SHIPMETHOD_SUBTASKS + \
+    BILLING_SUBTASKS + FILL_CREDIT_SUBTASKS + FILL_GIFT_SUBTASKS + \
+    FINISH1_SUBTASKS + ['Click Amazon GoPage2'] + FINAL_SUBTASKS
+LABEL_NAME = SUBTASK_LIST
+
+
+# Additional Collections.
+FAILURE_SUBTASKS = ['Click ToU', 'Click SP']
+TERMINAL_SUBTASKS = FAILURE_SUBTASKS + ['Click Place Order']
+
+
+class Amazon(WobConfig):
+  environment_id = 'amazon'
+
+  def __init__(self, seed: int, keep_pristine: bool = False):
+    super().__init__()
+    self.num_graphs = 1
+    self.max_step = 37
+    self.graph = self._construct_task(seed=seed, keep_pristine=keep_pristine)
+    if keep_pristine:
+      self._assert_subtask_set(self.subtasks, SUBTASK_LIST)
+
+    # Define subtask rewards.
+    self.subtask_reward = {subtask.name: subtask.reward for subtask in self.graph.nodes}
+    assert len(self.subtasks) == len(self.subtask_reward)
+
+    # TODO: revive later with EXTRA_OPTIONS.
+    # Additional subtask reward for NO_OP.
+    #self.subtask_reward['NO_OP'] = 0.
+
+    self._construct_mappings()
+
+    # Define special completion mechanism (e.g. toggling)
+    self.option_extra_outcome = self._construct_option_outcome()
+
+  def _construct_task(self, seed: int, keep_pristine: bool = False):
+    """Implement precondition & subtask reward & terminal subtasks
+    """
+    # Create graph with random perturbation.
+    rng = np.random.RandomState(seed)  # pylint: disable=no-member
+
+    g = SubtaskLogicGraph('Amazon')
+
+    if not keep_pristine:
+      # Sample base layer distractors & failure nodes.
+      distractors = graph_utils.sample_subtasks(rng, pool=base.EXTRA_DISTRACTORS,
+                                                minimum_size=0)
+      base_failures = graph_utils.sample_subtasks(rng, pool=base.FAILURES_SUBSET1,
+                                             minimum_size=0, maximum_size=3)
+      base_subtasks = distractors + base_failures + ['Click Amazon GoPage1']
+      terminal_subtasks = base_failures.copy()
+    else:
+      base_subtasks = BASE_SUBTASKS
+      terminal_subtasks = TERMINAL_SUBTASKS.copy()
+
+    # Add stage 0 (base) subtasks.
+    g.add_base(base_subtasks)
+
+    if not keep_pristine:
+      # bring all the possible subtasks (prune later).
+      shipping_subtasks = base.SHIPPING_SUBTASKS
+      billing_subtasks = base.BILLING_SUBTASKS
+      credit_subtasks = base.CREDIT_SUBTASKS
+    else:
+      shipping_subtasks = SHIPPING_SUBTASKS
+      billing_subtasks = BILLING_SUBTASKS
+      credit_subtasks = FILL_CREDIT_SUBTASKS
+
+    g.add_one_to_many(
+        source='Click Amazon GoPage1',
+        sinks=BASE2_SUBTASKS
+    )
+
+    # Connect Click Shipping ==> shipping subtasks.
+    g.add_one_to_many(
+        source='Click Shipping',
+        sinks=shipping_subtasks
+    )
+
+    # Connect Click Billing ==> billing subtasks.
+    g.add_one_to_many(
+        source='Click Billing',
+        sinks=billing_subtasks
+    )
+
+    # Connect 'Click ShipMethod' ==> shipping method subtasks.
+    g.add_one_to_many(
+        source='Click ShipMethod',
+        sinks=SELECT_SHIPMETHOD_SUBTASKS
+    )
+
+    # Connect 'Click Payment' ==> credit info subtasks.
+    g.add_one_to_many(
+        source='Click Payment',
+        sinks=credit_subtasks
+    )
+
+    # Connect 'Click Gift' ==> gift card info subtasks.
+    g.add_one_to_many(
+        source='Click Gift',
+        sinks=FILL_GIFT_SUBTASKS
+    )
+
+    # Sample preconditions from shipping & contact & shipmethod subtasks.
+    if not keep_pristine:
+      shipping_required = graph_utils.sample_subtasks(rng, pool=shipping_subtasks,
+                                                      minimum_size=1)
+      billing_required = graph_utils.sample_subtasks(rng, pool=billing_subtasks,
+                                                     minimum_size=1)
+      shipmethod_required = graph_utils.sample_subtasks(rng, pool=SELECT_SHIPMETHOD_SUBTASKS,
+                                                        minimum_size=1, maximum_size=1)
+      credit_required = graph_utils.sample_subtasks(rng, pool=credit_subtasks,
+                                                    minimum_size=1)
+    else:  # pristine ver.
+      shipping_required = SHIPPING_REQUIRED
+      billing_required = BILLING_REQUIRED
+      shipmethod_required = ['Click Standard']
+      credit_required = credit_subtasks
+
+    # Connect required shipping & billing & payment & shipmethod ==> final subtasks
+    g.add_many_to_one(sources=shipping_required, sink='Click FinishShipping')
+    g.add_many_to_one(sources=billing_required, sink='Click FinishBilling')
+    g.add_many_to_one(sources=shipmethod_required, sink='Click FinishShipMethod')
+    g.add_many_to_one(sources=credit_required, sink='Click FinishPayment')
+    g.add_many_to_one(sources=FINISH1_SUBTASKS, sink='Click Amazon GoPage2')
+
+    if not keep_pristine:
+      # Sample final layer distractors & failure nodes.
+      distractors = graph_utils.sample_subtasks(rng, pool=base.EDIT_DISTRACTORS,
+                                                minimum_size=0)
+      final_failures = graph_utils.sample_subtasks(rng, pool=base.FAILURES_SUBSET2,
+                                             minimum_size=0, maximum_size=3)
+      final_subtasks = distractors + final_failures + ['Click Place Order']
+      terminal_subtasks += final_failures + ['Click Place Order']
+    else:
+      final_subtasks = FINAL_SUBTASKS
+
+    # Final layer.
+    g.add_one_to_many(
+        source='Click Amazon GoPage2',
+        sinks=final_subtasks
+    )
+
+    # Define subtask rewards.
+    g.add_reward('Click Place Order', 5.)
+    if not keep_pristine:
+      for failure in base_failures + final_failures:
+        g.add_reward(failure, -rng.random())  # assign neg. reward
+    else:
+      g.add_reward('Click ToU', -1)
+      g.add_reward('Click SP', -1)
+
+    # Apply graph perturbation if necessary.
+    if not keep_pristine:
+      # Skip some optional subtasks
+      if rng.random() < 0.3:
+        g.remove_node('Fill G_NUM')
+      if rng.random() < 0.3:
+        g.remove_node('Fill G_PIN')
+
+    # Terminal subtasks
+    self.terminal_subtasks = terminal_subtasks
+    return g
+
+  def _construct_option_outcome(self):
+    """Implement a special mechanism of completion dynamics.
+      (i.e., one-step forward model)
+    """
+    option_extra_outcome = dict()
+
+    # TODO: Add toggling completions and handle random perturbation.
+
+    return option_extra_outcome
